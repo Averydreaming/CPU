@@ -1,0 +1,54 @@
+`include "op_map.v"
+//相当于 PPCA reg
+
+module RegFile (
+    input  wire             clk, rst, rdy,
+//一个周期处理一次 decoder里 （rd代表在reg中编号）知道rd 返回reg状态 (通过CDB传递)
+    input  wire [ 4: 0]     rs1, rs2,
+    output wire             reg1_ready, reg2_ready,
+    output wire [31: 0]     reg1,reg2,
+    output wire [ 3: 0]     reg1_reorder_ROB_pos, reg2_reorder_ROB_pos,
+//一个周期处理 ROB一次 commit
+    input  wire             commit_valid,
+    input  wire [ 3: 0]     commit_ROB_pos,
+    input  wire [ 4: 0]     commit_rd,
+    input  wire [31: 0]     commit_val,
+//一个周期处理一条指令进入ROB （update）
+    input  wire             update_valid,
+    input  wire [ 3: 0]     update_ROB_pos,
+    input  wire [ 4: 0]     update_rd,
+
+    reg  [31: 0]    Reg_reg     [31: 0];
+    reg  [ 3: 0]    Reg_reorder    [31: 0];
+    reg  [31: 0]    Reg_busy; //(1还未被commit 0commit完了)
+);
+    always @(*) begin
+        reg1_ready =1-reg_busy[rs1];
+        reg2_ready =1-reg_busy[rs2];
+        reg1 = Reg_reg[rs1];
+        reg2 = Reg_reg[rs2];
+        reg1_reorder_ROB_pos = Reg_reorder[rs1];
+        reg2_reorder_ROB_pos = Reg_reorder[rs2];
+    end
+    integer i;
+    always @(posedge clk) begin
+        if (rst) begin
+            Reg_busy <=0;
+            for (i = 0; i < 32; i = i + 1) reg_val[i] <= 0;
+        end
+        else if (rdy) begin
+            //处理 commit
+                if (commit_valid && commit_rd) begin
+                    Reg_reg[commit_rd] <= commit_val;
+                   /* Reg_busy[commit_rd] <= (ROB_pos[write_rd] == write_idx && write_rd != upd_rd);*/
+                   if(Reg_busy[commit_rd] && Reg_reorder[commit_rd]==commit_ROB_pos && update_rd!=commit_rd) Reg_busy[commit_rd]<=0;
+                end
+            //处理刚刚进入ROB的指令
+                if (update_valid && update_rd) begin
+                    Reg_busy[update_rd] <= 1;
+                    Reg_pos[update_rd] <= update_ROB_pos;
+                end
+            end
+    end
+
+endmodule

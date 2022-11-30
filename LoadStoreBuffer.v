@@ -1,7 +1,7 @@
 `include "op_map.v"
 //1、每个周期calc一条指令
 //2、每个周期读入一条指令
-module ReservationStation(
+module LoadStoreBuffer(
     input  wire             clk, LSBt, rdy,                          
     // 这一周期需要处理的指令
     //from decoder

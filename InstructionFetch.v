@@ -1,4 +1,4 @@
-`include "op_map.v"
+`include "opcode.v"
 //拿出一条指令执行Decoder
 //处理出下一条指令的位置（pc）
 /*
@@ -20,61 +20,88 @@
 		if(BranchJudge(x.inst&0xfff))next_pc=pc+order.imm;else next_pc=pc+4;
 	}
 */
-module IF (
-    input  wire             clk, rst, rdy, 
-    //拿出一条指令执行Decoder
-    input  wire             IC_Instr_valid, 
-    input  wire [31: 0]     IC_Instr, 
-   
-    output wire             Instr_ID_valid, 
-    output wire [31: 0]     Instr_ID, 
-    // Decoder上一条指令是否已经执行完成
-    input                   Decoder_not_ready_accept,
-     //处理出下一条指令的位置（pc）
-    output reg  [31: 0]     next_pc
-    
-);
-    reg  [31: 0]    imm;
-    assign imm = (op==7'd23)? {Instr[31:12], 12'b0}   :   (op==7'd55)?{Instr[31:12], 12'b0}   :   (op==7'd103)?{{20{Instr[31]}}, Instr[31:20]}   :    (op==7'd111) ? {{12{Instr[31]}}, Instr[19:12], Instr[20], Instr[30:21]} << 1   :   {{20{Instr[31]}}, Instr[7], Instr[30:25], Instr[11:8]} << 1   ;
-    reg  [31: 0]    pc;
-    assign Instr_ID_valid= IC_Instr_valid;
-    assign Instr_ID =IC_Instr;
+module InstructionFetch (
+    input  wire              clk,
+    input  wire              rst,
+    input  wire              rdy,
+    //从ICache 拿出一条指令执行Decoder
+    input  wire             Instr_valid,
+    input  wire [31: 0]     Instr,
+    input                   Decoder_not_ready_accept,  // Decoder上一条指令是否已经执行完成
 
+    output wire             Instr_valid_Decoder,
+    output wire [31: 0]     Instr_Decoder,
+    output wire             Instr_isjump,//TO SB 1 +imm 0 +4
+    output reg  [31: 0]     Instr_jump_wrong_to_pc,
+
+    //处理出下一条指令的位置（pc）向ICache读取
+    output reg  [31: 0]     next_pc
+
+    //处理分支预测错误时的情况
+     input  wire            jump_wrong,
+     input  wire [31: 0]    jump_wrong_to_pc,
+     input  wire            SB_commit,
+
+);
+    wire [ 6: 0]    opcode=instr[6:0];
+    reg  [31: 0]    imm;
+    reg  [31: 0]    pc;
+    reg  [ 1: 0]    BHT [4095:0];
+    reg  [ 11:0]    jumppc [15:0];
+    interger i;
+    interger x;
     always @(*) begin
-        if (!IC_Instr_valid ||  Decoder_ready_accept) begin
-            next_pc = pc;
-        end
-        else begin
-            case (op)
-                7'd99   : begin
-                    next_pc = pc + imm;
-                end
-                7'd111   : begin
-                    next_pc = pc + imm;
-                end
-                7'd103    : begin
-                    next_pc = pc + 4;
-                end
-                7'd55     : begin
-                    next_pc = pc + 4;
-                end
-                default    :  begin
-                    next_pc = pc + 4;
-                end
-            endcase
+        Instr_valid_Decoder=Instr_valid;
+        Instr_Decoder=Instr;
+    end
+    always @(*) begin
+        imm = (op==7'd23)? {Instr[31:12], 12'b0} : (op==7'd55) ? {Instr[31:12], 12'b0}  : (op==7'd103)?{{20{Instr[31]}}, Instr[31:20]}   :    (op==7'd111) ? {{12{Instr[31]}}, Instr[19:12], Instr[20], Instr[30:21]} << 1   :   {{20{Instr[31]}}, Instr[7], Instr[30:25], Instr[11:8]} << 1   ;
+    end
+    always @(*) begin
+           x=jumppc[head];
+    end
+    always @(*) begin
+        if (!Instr_valid ||  Decoder_not_ready_accept) begin
+            next_pc=pc; Instr_isjump=0; Instr_jump_pc=pc;
+        end else begin
+            next_pc=pc+4; Instr_isjump=0; Instr_jump_wrong_to_pc=pc+4;
+            if (opcode==`opcode_JAL || (opcode==`opcode_SB && BHT[pc[13:2]][1])) next_pc=pc+imm;    
+            if (opcode==`opcode_SB  && BHT[pc[13:2]][1])  begin Instr_isjump=1; Instr_jump_wrong_to_pc=pc+4; end
+            if (opcode==`opcode_SB  && !BHT[pc[13:2]][1]) begin Instr_isjump=0; Instr_jump_wrong_to_pc=pc+imm; end
         end
     end
-
+    
     always @(posedge clk) begin
         if (rst) begin
-            pc <= 32'b0;
-        end 
-        else if (IC_Instr_valid) begin
-            case (op)
-                7'd99       : pc <= pc + imm;
-                7'd111      : pc <= pc + imm;
-                default     : pc <= pc + 4;
-            endcase
+            pc<=0;
+            head<=0;
+            tail<=0;
+            for (i=0;i<4096; i=i+1) BHT[i]<=1;
+        end else if (rdy) begin
+            if (jump_wrong) begin
+                 pc<=jump_pc;
+                 head<=0;
+                 tail<=0;
+                 if (SB_commit) begin
+                    if(BHT[x][0]==0&&BHT[x][1]==0)begin BHT[x][0]<=0; BHT[x][1]<=1; end
+                    if(BHT[x][0]==0&&BHT[x][1]==1)begin BHT[x][0]<=1; BHT[x][1]<=0; end
+                    if(BHT[x][0]==1&&BHT[x][1]==0)begin BHT[x][0]<=0; BHT[x][1]<=1; end
+                    if(BHT[x][0]==1&&BHT[x][1]==1)begin BHT[x][0]<=1; BHT[x][1]<=0; end
+                 end
+            end 
+            if (!jump_wrong) begin
+                if (!Decoder_not_ready_accept && Instr_valid) begin
+                    if (opcode==`opcode_JAL || (opcode==`opcode_SB && BHT[pc[13:2]][1])) pc<=pc+imm; else pc<=pc+4;
+                    if (opcode==`opcode_SB) begin  tail<=-(~tail);  jumppc[tail] <= pc[13:2]; end
+                end
+                 if (SB_commit) begin
+                    head<=-(~head);
+                    if(BHT[x][0]==0&&BHT[x][1]==0)begin BHT[x][0]<=0; BHT[x][1]<=0; end
+                    if(BHT[x][0]==0&&BHT[x][1]==1)begin BHT[x][0]<=0; BHT[x][1]<=0; end
+                    if(BHT[x][0]==1&&BHT[x][1]==0)begin BHT[x][0]<=1; BHT[x][1]<=1; end
+                    if(BHT[x][0]==1&&BHT[x][1]==1)begin BHT[x][0]<=1; BHT[x][1]<=1; end
+                 end
+            end 
         end
     end
 
